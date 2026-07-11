@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced AR Hand Filters</title>
+    <!-- Hand Tracking -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <!-- Body Segmentation -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050505;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: sans-serif;
+            overflow: hidden;
+        }
+        .container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            max-width: 1280px;
+            max-height: 720px;
+            aspect-ratio: 16/9;
+        }
+        #webcam {
+            display: none;
+        }
+        #output_canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 12px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+        }
+
+        /* --- SPLIT SCREEN LOADING ANIMATION --- */
+        #loader-wrapper {
+            position: fixed;
+            top: 0; 
+            left: 0;
+            width: 100vw; 
+            height: 100vh;
+            z-index: 9999;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+        }
+        .split-half {
+            width: 100%;
+            height: 50vh;
+            background-color: #0c0c0c;
+            /* Smooth cinematic slide out */
+            transition: transform 1s cubic-bezier(0.86, 0, 0.07, 1);
+        }
+        /* Top and bottom separation lines for extra aesthetic */
+        .split-top { border-bottom: 1px solid rgba(164, 212, 197, 0.2); }
+        .split-bottom { border-top: 1px solid rgba(164, 212, 197, 0.2); }
+
+        /* Animation trigger classes */
+        body.loaded .split-top { transform: translateY(-100%); }
+        body.loaded .split-bottom { transform: translateY(100%); }
+
+        .loading-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 1.2rem;
+            text-align: center;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            transition: opacity 0.3s ease-out;
+            z-index: 10000;
+        }
+        body.loaded .loading-text {
+            opacity: 0; /* Fade out text just before splitting */
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Split Screen Loading UI -->
+    <div id="loader-wrapper">
+        <div class="split-half split-top"></div>
+        <div class="split-half split-bottom"></div>
+        <div class="loading-text">
+            Loading Dual AI Models...<br>
+            <small style="font-size: 0.9rem; opacity: 0.8; color: #a4d4c5; margin-top: 10px; display: block;">
+                Vibe Coded By Rajat Nawale
+            </small>
+        </div>
+    </div>
+
+    <div class="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+    <script>
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+
+        // --- THE EXACT REFERENCE FILTERS (Thermal Removed) ---
+        const filters = [
+            {
+                name: '1. Teal Grid + Cutouts',
+                type: 'seg',
+                fgFilter: 'grayscale(1) contrast(1.1) brightness(1.1)', 
+                drawBg: (ctx, w, h) => {
+                    ctx.strokeStyle = '#a4d4c5'; 
+                    ctx.lineWidth = 2.5; 
+                    ctx.beginPath();
+                    const gridSize = 45;
+                    for(let x = 0; x < w; x += gridSize) { ctx.moveTo(x, 0); ctx.lineTo(x, h); }
+                    for(let y = 0; y < h; y += gridSize) { ctx.moveTo(0, y); ctx.lineTo(w, y); }
+                    ctx.stroke();
+
+                    ctx.fillStyle = '#4a9582'; 
+                    ctx.fillRect(0, 0, w, h);
+                },
+                drawOverlay: (ctx, w, h, img) => {
+                    const s = 65; 
+                    const cx = w / 2;
+                    const cy = h / 2;
+                    
+                    ctx.save();
+                    ctx.lineWidth = 2;
+                    ctx.strokeStyle = 'white';
+                    
+                    const offsets = [
+                        {x: cx - 90, y: cy - 70}, 
+                        {x: cx + 30, y: cy - 40}, 
+                        {x: cx - 20, y: cy + 40}  
+                    ];
+
+                    offsets.forEach(pos => {
+                        ctx.drawImage(img, pos.x, pos.y, s, s, pos.x, pos.y, s, s);
+                        ctx.strokeRect(pos.x, pos.y, s, s);
+                    });
+                    ctx.restore();
+                }
+            },
+            {
+                name: '2. Neon Pop Glow + Black BG',
+                type: 'seg',
+                fgFilter: 'brightness(1.5) contrast(3) saturate(3) hue-rotate(-20deg) sepia(0.6)', 
+                drawBg: (ctx, w, h) => {
+                    ctx.fillStyle = '#000000'; 
+                    ctx.fillRect(0, 0, w, h);
+                }
+            },
+            {
+                name: '3. Maroon BG + B&W Person',
+                type: 'seg',
+                fgFilter: 'grayscale(1) contrast(1.1)', 
+                drawBg: (ctx, w, h) => {
+                    ctx.fillStyle = '#610c0c'; 
+                    ctx.fillRect(0, 0, w, h);
+                }
+            },
+            {
+                name: '4. Sepia Glowing Body',
+                type: 'seg',
+                fgFilter: 'sepia(1) saturate(1.5) contrast(1.1) brightness(1.3)', 
+                drawBg: (ctx, w, h) => {
+                    const grad = ctx.createLinearGradient(0, 0, w, h);
+                    grad.addColorStop(0, '#dca67b');
+                    grad.addColorStop(1, '#a67b5b');
+                    ctx.fillStyle = grad;
+                    ctx.fillRect(0, 0, w, h);
+                }
+            }
+        ];
+        
+        let currentFilterIndex = 0;
+        let handsWerePinched = false; 
+        let smoothedPoints = null;
+        const SMOOTHING_FACTOR = 0.35; 
+
+        let latestHandResults = null;
+
+        // 1. Initialize Hand Tracking
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.6, minTrackingConfidence: 0.6 });
+        hands.onResults((results) => { latestHandResults = results; });
+
+        // 2. Initialize Body Segmentation
+        const segmentation = new SelfieSegmentation({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/${file}` });
+        segmentation.setOptions({ modelSelection: 1 }); 
+        
+        // 3. The Master Render Loop
+        segmentation.onResults((segResults) => {
+            if (canvasElement.width !== segResults.image.width) {
+                canvasElement.width = segResults.image.width;
+                canvasElement.height = segResults.image.height;
+            }
+
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // Mirror canvas
+            canvasCtx.translate(canvasElement.width, 0);
+            canvasCtx.scale(-1, 1);
+
+            // ALWAYS draw the base unmodified video first
+            canvasCtx.drawImage(segResults.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (latestHandResults && latestHandResults.multiHandLandmarks && latestHandResults.multiHandLandmarks.length === 2) {
+                
+                let handA = latestHandResults.multiHandLandmarks[0];
+                let handB = latestHandResults.multiHandLandmarks[1];
+                let handLeft = handA[8].x < handB[8].x ? handA : handB;
+                let handRight = handA[8].x >= handB[8].x ? handA : handB;
+
+                const rawPoints = [
+                    { x: handLeft[4].x * canvasElement.width,  y: handLeft[4].y * canvasElement.height },  
+                    { x: handLeft[8].x * canvasElement.width,  y: handLeft[8].y * canvasElement.height },  
+                    { x: handRight[8].x * canvasElement.width, y: handRight[8].y * canvasElement.height }, 
+                    { x: handRight[4].x * canvasElement.width, y: handRight[4].y * canvasElement.height }  
+                ];
+
+                if (!smoothedPoints) { smoothedPoints = rawPoints; } 
+                else {
+                    for (let i = 0; i < 4; i++) {
+                        smoothedPoints[i].x = smoothedPoints[i].x * (1 - SMOOTHING_FACTOR) + rawPoints[i].x * SMOOTHING_FACTOR;
+                        smoothedPoints[i].y = smoothedPoints[i].y * (1 - SMOOTHING_FACTOR) + rawPoints[i].y * SMOOTHING_FACTOR;
+                    }
+                }
+
+                // Check Pinch Gesture
+                const dxLeft = smoothedPoints[0].x - smoothedPoints[1].x;
+                const dyLeft = smoothedPoints[0].y - smoothedPoints[1].y;
+                const pinchDistLeft = Math.sqrt(dxLeft * dxLeft + dyLeft * dyLeft);
+
+                const dxRight = smoothedPoints[3].x - smoothedPoints[2].x;
+                const dyRight = smoothedPoints[3].y - smoothedPoints[2].y;
+                const pinchDistRight = Math.sqrt(dxRight * dxRight + dyRight * dyRight);
+
+                const avgPinchDist = (pinchDistLeft + pinchDistRight) / 2;
+
+                if (avgPinchDist < 60) {
+                    handsWerePinched = true; 
+                } else if (avgPinchDist > 100 && handsWerePinched) {
+                    currentFilterIndex = (currentFilterIndex + 1) % filters.length;
+                    handsWerePinched = false; 
+                }
+
+                // --- SETUP THE RIBBON ---
+                canvasCtx.save();
+                canvasCtx.beginPath();
+                canvasCtx.moveTo(smoothedPoints[0].x, smoothedPoints[0].y);
+                for (let i = 1; i < 4; i++) { canvasCtx.lineTo(smoothedPoints[i].x, smoothedPoints[i].y); }
+                canvasCtx.closePath();
+                
+                canvasCtx.clip();
+                canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+                const activeFilter = filters[currentFilterIndex];
+
+                if (activeFilter.type === 'seg') {
+                    // 1. Draw AI Mask
+                    canvasCtx.globalCompositeOperation = 'source-over';
+                    canvasCtx.drawImage(segResults.segmentationMask, 0, 0, canvasElement.width, canvasElement.height);
+                    
+                    // 2. Color the Body
+                    canvasCtx.globalCompositeOperation = 'source-in';
+                    canvasCtx.filter = activeFilter.fgFilter;
+                    canvasCtx.drawImage(segResults.image, 0, 0, canvasElement.width, canvasElement.height);
+                    
+                    // 3. Draw Background behind the person
+                    canvasCtx.globalCompositeOperation = 'destination-over';
+                    canvasCtx.filter = 'none';
+                    if (activeFilter.drawBg) {
+                        activeFilter.drawBg(canvasCtx, canvasElement.width, canvasElement.height, segResults.image);
+                    }
+                    
+                    // 4. Draw Cutouts over everything
+                    canvasCtx.globalCompositeOperation = 'source-over';
+                    canvasCtx.filter = 'none';
+                    if (activeFilter.drawOverlay) {
+                        activeFilter.drawOverlay(canvasCtx, canvasElement.width, canvasElement.height, segResults.image);
+                    }
+                } else {
+                    canvasCtx.filter = activeFilter.fgFilter;
+                    canvasCtx.drawImage(segResults.image, 0, 0, canvasElement.width, canvasElement.height);
+                    canvasCtx.filter = 'none';
+                }
+
+                canvasCtx.restore(); 
+
+                // Draw glowing outline
+                canvasCtx.beginPath();
+                canvasCtx.moveTo(smoothedPoints[0].x, smoothedPoints[0].y);
+                for (let i = 1; i < 4; i++) { canvasCtx.lineTo(smoothedPoints[i].x, smoothedPoints[i].y); }
+                canvasCtx.closePath();
+
+                canvasCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+                canvasCtx.lineWidth = 3;
+                canvasCtx.stroke();
+            } else {
+                smoothedPoints = null; 
+            }
+
+            canvasCtx.restore(); 
+        });
+
+        // 4. Start Camera and Trigger Animation
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await hands.send({ image: videoElement });
+                await segmentation.send({ image: videoElement });
+            },
+            width: 1280,
+            height: 720
+        });
+        
+        camera.start().then(() => { 
+            // Triggers the split screen slide animation
+            document.body.classList.add('loaded');
+        });
+    </script>
+</body>
+</html>
